@@ -83,7 +83,7 @@ QUIT
 """
 
         result = subprocess.run(
-            [str(XFOIL_PATH)],
+    [str(XFOIL_PATH), "/dev/null"],
             input=commands,
             text=True,
             capture_output=True,
@@ -186,7 +186,7 @@ QUIT
 """
 
         result = subprocess.run(
-            [str(XFOIL_PATH)],
+    [str(XFOIL_PATH), "/dev/null"],
             input=commands,
             text=True,
             capture_output=True,
@@ -206,7 +206,6 @@ QUIT
             raise RuntimeError(
                 "Invalid pressure coefficient file."
             )
-
         return {
             "x": data[:, 0],
             "Cp": data[:, 1],
