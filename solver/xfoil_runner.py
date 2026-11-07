@@ -206,6 +206,7 @@ QUIT
             raise RuntimeError(
                 "Invalid pressure coefficient file."
             )
+
         return {
             "x": data[:, 0],
             "Cp": data[:, 1],
