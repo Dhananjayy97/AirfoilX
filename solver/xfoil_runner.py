@@ -188,23 +188,36 @@ def run_xfoil_sweep(
 
 
 def run_xfoil_cp(naca, reynolds, alpha, mach=0.0):
+    """Return XFOIL pressure-coefficient data, with an inviscid fallback."""
     if not XFOIL_PATH.is_file():
-        raise FileNotFoundError(
-            f"XFOIL executable not found: {XFOIL_PATH}"
-        )
+        raise FileNotFoundError(f"XFOIL executable not found: {XFOIL_PATH}")
 
     if not re.fullmatch(r"\d{4}", str(naca)):
         raise ValueError("NACA code must contain exactly four digits.")
     if not np.isfinite(reynolds) or reynolds <= 0:
         raise ValueError("Reynolds number must be greater than zero.")
+    if not np.isfinite(mach) or mach < 0 or mach > 1:
+        raise ValueError("Mach number must be between 0 and 1.")
+
+    def read_cp_file(cp_file):
+        if not cp_file.exists() or cp_file.stat().st_size == 0:
+            return None
+        try:
+            data = np.loadtxt(cp_file, comments="#", ndmin=2)
+        except (ValueError, OSError):
+            return None
+        if data.shape[1] < 2:
+            return None
+        data = data[np.all(np.isfinite(data[:, :2]), axis=1)]
+        return data if data.shape[0] else None
+
+    logs = []
 
     with tempfile.TemporaryDirectory(prefix="aerofoilx_cp_") as temp_dir:
-        cp_file = Path(temp_dir) / "pressure.txt"
+        cp_file = Path(temp_dir) / "cp.dat"
 
-        commands = (
-            "PLOP\n"
-            "G\n"
-            "\n"
+        # Viscous attempt. No PLOP commands are needed for Cp output.
+        viscous_commands = (
             f"NACA {naca}\n"
             "PANE\n"
             "OPER\n"
@@ -212,48 +225,75 @@ def run_xfoil_cp(naca, reynolds, alpha, mach=0.0):
             f"MACH {mach:.4f}\n"
             "ITER 200\n"
             f"ALFA {float(alpha):.3f}\n"
-            f"CPWR {cp_file}\n"
+            "CPWR cp.dat\n"
             "\n"
             "QUIT\n"
         )
 
         try:
-            process = subprocess.run(
+            proc = subprocess.run(
                 [str(XFOIL_PATH)],
-                input=commands,
+                input=viscous_commands,
                 text=True,
                 capture_output=True,
                 cwd=temp_dir,
                 timeout=120,
                 check=False,
             )
+            logs.append((proc.stdout or "") + "\n" + (proc.stderr or ""))
         except subprocess.TimeoutExpired as exc:
-            if not cp_file.exists():
-                raise RuntimeError(
-                    "XFOIL timed out before writing pressure data."
-                ) from exc
+            partial = exc.stdout or ""
+            if isinstance(partial, bytes):
+                partial = partial.decode(errors="replace")
+            logs.append(partial)
 
-        if not cp_file.exists() or cp_file.stat().st_size == 0:
-            output = ""
-            if "process" in locals():
-                output = (process.stdout or "") + "\n" + (process.stderr or "")
-            raise RuntimeError(
-                "XFOIL did not generate pressure coefficient data.\n"
-                + output[-4000:]
+        data = read_cp_file(cp_file)
+        cp_mode = "viscous" if data is not None else None
+
+        # If the viscous solver crashes before CPWR, retry without VISC.
+        if data is None:
+            cp_file.unlink(missing_ok=True)
+            inviscid_commands = (
+                f"NACA {naca}\n"
+                "PANE\n"
+                "OPER\n"
+                f"MACH {mach:.4f}\n"
+                f"ALFA {float(alpha):.3f}\n"
+                "CPWR cp.dat\n"
+                "\n"
+                "QUIT\n"
             )
 
-        data = np.loadtxt(cp_file, comments="#", ndmin=2)
-        data = data[np.all(np.isfinite(data[:, :2]), axis=1)]
+            try:
+                proc2 = subprocess.run(
+                    [str(XFOIL_PATH)],
+                    input=inviscid_commands,
+                    text=True,
+                    capture_output=True,
+                    cwd=temp_dir,
+                    timeout=120,
+                    check=False,
+                )
+                logs.append((proc2.stdout or "") + "\n" + (proc2.stderr or ""))
+            except subprocess.TimeoutExpired as exc:
+                partial = exc.stdout or ""
+                if isinstance(partial, bytes):
+                    partial = partial.decode(errors="replace")
+                logs.append(partial)
 
-        if data.shape[0] == 0 or data.shape[1] < 2:
-            raise RuntimeError("XFOIL generated an invalid pressure data file.")
+            data = read_cp_file(cp_file)
+            if data is not None:
+                cp_mode = "inviscid"
+
+        if data is None:
+            raise RuntimeError(
+                "XFOIL failed to write pressure coefficient data in both "
+                "viscous and inviscid modes.\n" + "\n".join(logs)[-5000:]
+            )
 
         return {
             "x": data[:, 0],
             "Cp": data[:, 1],
-            "solver_output": (
-                (process.stdout or "") + "\n" + (process.stderr or "")
-                if "process" in locals()
-                else ""
-            ),
+            "solver_output": "\n".join(logs),
+            "cp_mode": cp_mode,
         }
