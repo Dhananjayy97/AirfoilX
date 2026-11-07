@@ -1,16 +1,25 @@
+```python
 import subprocess
 import tempfile
 import shutil
 from pathlib import Path
 import numpy as np
 
-# Find XFOIL automatically
-xfoil_location = shutil.which("xfoil")
 
-if xfoil_location:
-    XFOIL_PATH = Path(xfoil_location)
-else:
-    XFOIL_PATH = (
+# ==================================================
+# 1. FIND XFOIL EXECUTABLE
+# ==================================================
+
+def find_xfoil():
+
+    # First, check system PATH
+    xfoil_location = shutil.which("xfoil")
+
+    if xfoil_location:
+        return Path(xfoil_location)
+
+    # Check local Mac installation
+    mac_path = (
         Path.home()
         / "tools"
         / "xfoil-applesilicon"
@@ -18,21 +27,40 @@ else:
         / "xfoil"
     )
 
+    if mac_path.is_file():
+        return mac_path
+
+    raise FileNotFoundError(
+        "XFOIL executable not found. "
+        "Install XFOIL and add it to the system PATH."
+    )
+
+
+XFOIL_PATH = find_xfoil()
+
+
+# ==================================================
+# 2. PARSE POLAR DATA
+# ==================================================
 
 def parse_polar(polar_file):
+
     results = []
 
+    if not polar_file.exists():
+        return results
+
     with open(polar_file, "r") as file:
+
         for line in file:
+
             values = line.split()
 
             if len(values) < 7:
                 continue
 
             try:
-                numbers = [
-                    float(value) for value in values[:7]
-                ]
+                numbers = [float(value) for value in values[:7]]
             except ValueError:
                 continue
 
@@ -52,12 +80,35 @@ def parse_polar(polar_file):
     return results
 
 
-def _run_xfoil(naca, reynolds, mach, analysis_command):
+# ==================================================
+# 3. COMMON XFOIL EXECUTION FUNCTION
+# ==================================================
 
-    if not XFOIL_PATH.exists():
+def execute_xfoil(commands, timeout=120):
+
+    if not XFOIL_PATH.is_file():
         raise FileNotFoundError(
             f"XFOIL executable not found: {XFOIL_PATH}"
         )
+
+    result = subprocess.run(
+        [str(XFOIL_PATH)],
+        input=commands,
+        text=True,
+        capture_output=True,
+        timeout=timeout
+    )
+
+    output = result.stdout + "\n" + result.stderr
+
+    return output
+
+
+# ==================================================
+# 4. SINGLE POINT AND SWEEP ANALYSIS
+# ==================================================
+
+def _run_xfoil(naca, reynolds, mach, analysis_command):
 
     with tempfile.TemporaryDirectory(
         dir="/tmp",
@@ -67,6 +118,10 @@ def _run_xfoil(naca, reynolds, mach, analysis_command):
         polar_file = Path(temp_dir) / "polar.txt"
 
         commands = f"""
+PLOP
+G
+F
+
 NACA {naca}
 PANE
 OPER
@@ -82,31 +137,30 @@ PACC
 QUIT
 """
 
-        result = subprocess.run(
-    [str(XFOIL_PATH), "/dev/null"],
-            input=commands,
-            text=True,
-            capture_output=True,
-            timeout=120
-        )
+        output = execute_xfoil(commands)
 
         if not polar_file.exists():
+
             raise RuntimeError(
-                "XFOIL did not generate a polar file.\n"
-                + result.stdout[-3000:]
-                + result.stderr
+                "XFOIL did not generate a polar file.\n\n"
+                + output[-4000:]
             )
 
         results = parse_polar(polar_file)
 
         if not results:
+
             raise RuntimeError(
-                "No converged aerodynamic data found.\n"
-                + result.stdout[-3000:]
+                "No converged aerodynamic data found.\n\n"
+                + output[-4000:]
             )
 
-        return results, result.stdout
+        return results, output
 
+
+# ==================================================
+# 5. SINGLE ANGLE ANALYSIS
+# ==================================================
 
 def run_xfoil(naca, reynolds, alpha, mach=0.0):
 
@@ -118,10 +172,15 @@ def run_xfoil(naca, reynolds, alpha, mach=0.0):
     )
 
     result = results[-1]
+
     result["solver_output"] = output
 
     return result
 
+
+# ==================================================
+# 6. ANGLE OF ATTACK SWEEP
+# ==================================================
 
 def run_xfoil_sweep(
     naca,
@@ -133,7 +192,9 @@ def run_xfoil_sweep(
 ):
 
     if alpha_step <= 0:
-        raise ValueError("Alpha step must be positive.")
+        raise ValueError(
+            "Alpha step must be positive."
+        )
 
     if alpha_start >= alpha_end:
         raise ValueError(
@@ -154,17 +215,16 @@ def run_xfoil_sweep(
     return results
 
 
+# ==================================================
+# 7. PRESSURE COEFFICIENT ANALYSIS
+# ==================================================
+
 def run_xfoil_cp(
     naca,
     reynolds,
     alpha,
     mach=0.0
 ):
-
-    if not XFOIL_PATH.exists():
-        raise FileNotFoundError(
-            f"XFOIL executable not found: {XFOIL_PATH}"
-        )
 
     with tempfile.TemporaryDirectory(
         dir="/tmp",
@@ -174,6 +234,10 @@ def run_xfoil_cp(
         cp_file = Path(temp_dir) / "pressure.txt"
 
         commands = f"""
+PLOP
+G
+F
+
 NACA {naca}
 PANE
 OPER
@@ -185,30 +249,31 @@ CPWR {cp_file}
 QUIT
 """
 
-        result = subprocess.run(
-    [str(XFOIL_PATH), "/dev/null"],
-            input=commands,
-            text=True,
-            capture_output=True,
-            timeout=120
-        )
+        output = execute_xfoil(commands)
 
         if not cp_file.exists():
+
             raise RuntimeError(
-                "XFOIL did not generate pressure data.\n"
-                + result.stdout[-3000:]
-                + result.stderr
+                "XFOIL did not generate pressure data.\n\n"
+                + output[-4000:]
             )
 
-        data = np.loadtxt(cp_file, comments="#")
+        data = np.loadtxt(
+            cp_file,
+            comments="#",
+            ndmin=2
+        )
 
-        if data.ndim != 2 or data.shape[1] < 2:
+        if data.shape[0] == 0 or data.shape[1] < 2:
+
             raise RuntimeError(
-                "Invalid pressure coefficient file."
+                "Invalid pressure coefficient file.\n\n"
+                + output[-4000:]
             )
 
         return {
             "x": data[:, 0],
             "Cp": data[:, 1],
-            "solver_output": result.stdout
+            "solver_output": output
         }
+```
