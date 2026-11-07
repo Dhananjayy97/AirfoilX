@@ -1,17 +1,22 @@
-
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
 import numpy as np
 
+# Find XFOIL automatically
+xfoil_location = shutil.which("xfoil")
 
-XFOIL_PATH = (
-    Path.home()
-    / "tools"
-    / "xfoil-applesilicon"
-    / "bin"
-    / "xfoil"
-)
+if xfoil_location:
+    XFOIL_PATH = Path(xfoil_location)
+else:
+    XFOIL_PATH = (
+        Path.home()
+        / "tools"
+        / "xfoil-applesilicon"
+        / "bin"
+        / "xfoil"
+    )
 
 
 def parse_polar(polar_file):
